@@ -1,3 +1,4 @@
+import contextlib
 import sqlite3
 import tempfile
 import unittest
@@ -45,7 +46,7 @@ class SnapshotTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             path, memberships = write_snapshot(data, Path(directory))
-            with sqlite3.connect(path) as connection:
+            with contextlib.closing(sqlite3.connect(path)) as connection:
                 tracks = connection.execute(
                     "SELECT persistent_id, location, duration, rating, favorited "
                     "FROM tracks ORDER BY persistent_id"

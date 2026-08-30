@@ -261,7 +261,10 @@ def make_handler(snapshot: Path, static_dir: Path = STATIC_DIR) -> type[SimpleHT
                     chunk = source.read(min(64 * 1024, remaining))
                     if not chunk:
                         break
-                    self.wfile.write(chunk)
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
                     remaining -= len(chunk)
 
     return MusicHandler
