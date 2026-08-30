@@ -1,0 +1,16 @@
+[project]
+name = "apple-music-export"
+version = "0.1.0"
+description = "Export Apple Music status to timestamped SQLite snapshots"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pyrefly>=0.44.0",
+    "ruff>=0.12.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
