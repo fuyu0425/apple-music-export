@@ -17,6 +17,7 @@ class SnapshotTest(unittest.TestCase):
                     "artist": "Artist",
                     "album": "Album",
                     "location": "/music/one.m4a",
+                    "duration": 245.5,
                     "rating": 80,
                     "favorited": True,
                 },
@@ -27,6 +28,7 @@ class SnapshotTest(unittest.TestCase):
                     "artist": "Artist",
                     "album": "Album",
                     "location": "/music/two.m4a",
+                    "duration": 180.0,
                     "rating": 20,
                     "favorited": False,
                 },
@@ -45,8 +47,12 @@ class SnapshotTest(unittest.TestCase):
             path, memberships = write_snapshot(data, Path(directory))
             with sqlite3.connect(path) as connection:
                 tracks = connection.execute(
-                    "SELECT persistent_id, location, rating, favorited FROM tracks ORDER BY persistent_id"
+                    "SELECT persistent_id, location, duration, rating, favorited "
+                    "FROM tracks ORDER BY persistent_id"
                 ).fetchall()
+                schema_version = connection.execute(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'"
+                ).fetchone()[0]
                 links = connection.execute(
                     "SELECT track_persistent_id, playlist_persistent_id "
                     "FROM track_playlists ORDER BY track_persistent_id"
@@ -55,11 +61,12 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(
             tracks,
             [
-                ("TRACK1", "/music/one.m4a", 80, 1),
-                ("TRACK2", "/music/two.m4a", 20, 0),
+                ("TRACK1", "/music/one.m4a", 245.5, 80, 1),
+                ("TRACK2", "/music/two.m4a", 180.0, 20, 0),
             ],
         )
         self.assertEqual(links, [("TRACK1", "PLAYLIST1"), ("TRACK2", "PLAYLIST1")])
+        self.assertEqual(schema_version, "2")
         self.assertEqual(memberships, 2)
 
 

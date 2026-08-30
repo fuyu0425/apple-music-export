@@ -72,10 +72,38 @@ function formatTime(seconds) {
   return `${minutes}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
 }
 
-function ratingLabel(rating) {
-  if (!rating) return "—";
-  const stars = rating / 20;
-  return `${Number.isInteger(stars) ? stars : stars.toFixed(1)} ★`;
+function formatTrackTime(seconds) {
+  return seconds > 0 ? formatTime(seconds) : "—";
+}
+
+function Artwork({ track, active = false }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <span className={active ? "track-artwork active" : "track-artwork"}>
+      {!failed ? (
+        <img
+          src={`/api/tracks/${encodeURIComponent(track.persistent_id)}/artwork`}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <MusicIcon size={19} />
+      )}
+      {active ? <span className="artwork-playing"><PlayIcon paused size={14} /></span> : null}
+    </span>
+  );
+}
+
+function StarRating({ rating }) {
+  return (
+    <span className="star-rating" aria-label={`${rating / 20} out of 5 stars`} title={`${rating}/100`}>
+      {[20, 40, 60, 80, 100].map((threshold) => (
+        <span key={threshold} className={rating >= threshold ? "filled" : ""}>★</span>
+      ))}
+    </span>
+  );
 }
 
 export default function App() {
@@ -149,7 +177,9 @@ export default function App() {
       : tracks;
     const direction = sort.direction === "asc" ? 1 : -1;
     return [...filtered].sort((left, right) => {
-      if (sort.key === "rating") return (left.rating - right.rating) * direction;
+      if (sort.key === "rating" || sort.key === "duration") {
+        return (left[sort.key] - right[sort.key]) * direction;
+      }
       return left[sort.key].localeCompare(right[sort.key], undefined, {
         numeric: true,
         sensitivity: "base",
@@ -305,40 +335,44 @@ export default function App() {
           <table>
             <thead>
               <tr>
-                <th className="number-column">#</th>
-                <th><button type="button" onClick={() => changeSort("name")}>Title{sortMark("name")}</button></th>
-                <th><button type="button" onClick={() => changeSort("artist")}>Artist{sortMark("artist")}</button></th>
-                <th><button type="button" onClick={() => changeSort("album")}>Album{sortMark("album")}</button></th>
+                <th className="favorite-column"><span className="sr-only">Favorite</span></th>
+                <th><button type="button" onClick={() => changeSort("name")}>Song{sortMark("name")}</button></th>
                 <th className="rating-column"><button type="button" onClick={() => changeSort("rating")}>Rating{sortMark("rating")}</button></th>
+                <th><button type="button" onClick={() => changeSort("artist")}>Artist{sortMark("artist")}</button></th>
+                <th className="time-column"><button type="button" onClick={() => changeSort("duration")}>Time{sortMark("duration")}</button></th>
+                <th className="more-column"><span className="sr-only">More</span></th>
               </tr>
             </thead>
             <tbody>
-              {visibleTracks.map((track, index) => (
-                <tr
-                  key={track.persistent_id}
-                  data-track-id={track.persistent_id}
-                  className={selectedTrack?.persistent_id === track.persistent_id ? "selected" : ""}
-                  onClick={() => setSelectedTrack(track)}
-                  onDoubleClick={() => startTrack(track)}
-                >
-                  <td className="number-column">
-                    {selectedTrack?.persistent_id === track.persistent_id && playing ? (
-                      <span className="playing-bars" aria-label="Playing"><i /><i /><i /></span>
-                    ) : (
-                      index + 1
-                    )}
-                  </td>
-                  <td>
-                    <div className="track-title">
-                      <span>{track.name}</span>
-                      {!track.playable ? <small>Cloud only</small> : null}
-                    </div>
-                  </td>
-                  <td>{track.artist || "Unknown Artist"}</td>
-                  <td>{track.album || "Unknown Album"}</td>
-                  <td className="rating-column">{track.favorited ? <span className="favorite-dot" title="Favorite" /> : null}{ratingLabel(track.rating)}</td>
-                </tr>
-              ))}
+              {visibleTracks.map((track) => {
+                const active = selectedTrack?.persistent_id === track.persistent_id;
+                return (
+                  <tr
+                    key={track.persistent_id}
+                    data-track-id={track.persistent_id}
+                    className={active ? "selected" : ""}
+                    onClick={() => setSelectedTrack(track)}
+                    onDoubleClick={() => startTrack(track)}
+                  >
+                    <td className="favorite-column">
+                      {track.favorited ? <span className="favorite-star" title="Favorite">★</span> : null}
+                    </td>
+                    <td>
+                      <div className="song-cell">
+                        <Artwork track={track} active={active && playing} />
+                        <div className="track-title">
+                          <strong>{track.name}</strong>
+                          <span>{track.album || "Unknown Album"}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="rating-column"><StarRating rating={track.rating} /></td>
+                    <td>{track.artist || "Unknown Artist"}</td>
+                    <td className="time-column">{formatTrackTime(track.duration)}</td>
+                    <td className="more-column"><span aria-hidden="true">•••</span></td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           {!loading && !visibleTracks.length ? (

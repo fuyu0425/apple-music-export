@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import functools
 import json
 import mimetypes
 import re
 import sqlite3
+import subprocess
+import threading
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +19,9 @@ ROOT = Path(__file__).parent
 SNAPSHOTS = ROOT / "snapshots"
 STATIC_DIR = ROOT / "frontend" / "dist"
 RANGE_PATTERN = re.compile(r"bytes=(\d*)-(\d*)")
+ARTWORK_DATA_PATTERN = re.compile(r"\(\$([0-9A-Fa-f]+)\$\)$")
+PERSISTENT_ID_PATTERN = re.compile(r"[0-9A-F]{16}")
+ARTWORK_SLOTS = threading.BoundedSemaphore(2)
 
 
 def newest_snapshot(directory: Path = SNAPSHOTS) -> Path:
@@ -31,7 +38,7 @@ def connect_read_only(snapshot: Path) -> sqlite3.Connection:
 
 
 def library_payload(snapshot: Path) -> dict[str, Any]:
-    with connect_read_only(snapshot) as connection:
+    with contextlib.closing(connect_read_only(snapshot)) as connection:
         metadata = dict(connection.execute("SELECT key, value FROM metadata"))
         playlists = [
             dict(row)
@@ -52,10 +59,12 @@ def tracks_payload(snapshot: Path, playlist_id: str | None = None) -> list[dict[
         )
         parameters = (playlist_id,)
 
-    with connect_read_only(snapshot) as connection:
+    with contextlib.closing(connect_read_only(snapshot)) as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(tracks)")}
+        duration = "t.duration" if "duration" in columns else "0.0"
         rows = connection.execute(
             "SELECT t.persistent_id, t.name, t.artist, t.album, t.rating, t.favorited,"
-            " t.location IS NOT NULL AS playable FROM tracks AS t"
+            f" {duration} AS duration, t.location IS NOT NULL AS playable FROM tracks AS t"
             f"{membership_join}"
             " ORDER BY t.artist COLLATE NOCASE, t.album COLLATE NOCASE, t.name COLLATE NOCASE",
             parameters,
@@ -64,7 +73,7 @@ def tracks_payload(snapshot: Path, playlist_id: str | None = None) -> list[dict[
 
 
 def track_media(snapshot: Path, persistent_id: str) -> Path | None:
-    with connect_read_only(snapshot) as connection:
+    with contextlib.closing(connect_read_only(snapshot)) as connection:
         row = connection.execute(
             "SELECT location FROM tracks WHERE persistent_id = ?", (persistent_id,)
         ).fetchone()
@@ -76,6 +85,54 @@ def track_media(snapshot: Path, persistent_id: str) -> Path | None:
         location = unquote(urlparse(location).path)
     path = Path(location)
     return path if path.is_file() else None
+
+
+def decode_artwork(raw_data: str) -> tuple[bytes, str] | None:
+    match = ARTWORK_DATA_PATTERN.search(raw_data.strip())
+    if match is None:
+        return None
+    data = bytes.fromhex(match.group(1))
+    if data.startswith(b"\xff\xd8\xff"):
+        media_type = "image/jpeg"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        media_type = "image/png"
+    elif data.startswith((b"GIF87a", b"GIF89a")):
+        media_type = "image/gif"
+    else:
+        media_type = "application/octet-stream"
+    return data, media_type
+
+
+# ponytail: cache 96 full-size covers; add thumbnail generation if memory or reload cost matters.
+@functools.lru_cache(maxsize=96)
+def track_artwork(snapshot: Path, persistent_id: str) -> tuple[bytes, str] | None:
+    if PERSISTENT_ID_PATTERN.fullmatch(persistent_id) is None:
+        return None
+    with contextlib.closing(connect_read_only(snapshot)) as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM tracks WHERE persistent_id = ?", (persistent_id,)
+        ).fetchone()
+    if exists is None:
+        return None
+
+    script = f"""
+const music = Application("Music");
+const matches = music.libraryPlaylists[0].tracks.whose({{persistentID: {json.dumps(persistent_id)}}})();
+const track = matches[0];
+track && track.artworks.length ? String(track.artworks[0].rawData()) : "";
+"""
+    try:
+        with ARTWORK_SLOTS:
+            result = subprocess.run(
+                ["/usr/bin/osascript", "-l", "JavaScript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return decode_artwork(result.stdout) if result.returncode == 0 else None
 
 
 def byte_range(header: str | None, size: int) -> tuple[int, int, bool]:
@@ -121,6 +178,12 @@ def make_handler(snapshot: Path, static_dir: Path = STATIC_DIR) -> type[SimpleHT
                 playlist_id = parse_qs(request.query).get("playlist_id", [None])[0]
                 self._json({"tracks": tracks_payload(snapshot, playlist_id)}, send_body)
                 return
+            if request.path.startswith("/api/tracks/") and request.path.endswith("/artwork"):
+                persistent_id = unquote(
+                    request.path.removeprefix("/api/tracks/").removesuffix("/artwork")
+                )
+                self._artwork(persistent_id, send_body)
+                return
             if request.path.startswith("/api/tracks/") and request.path.endswith("/audio"):
                 persistent_id = unquote(
                     request.path.removeprefix("/api/tracks/").removesuffix("/audio")
@@ -150,6 +213,20 @@ def make_handler(snapshot: Path, static_dir: Path = STATIC_DIR) -> type[SimpleHT
             self.end_headers()
             if send_body:
                 self.wfile.write(body)
+
+        def _artwork(self, persistent_id: str, send_body: bool) -> None:
+            artwork = track_artwork(snapshot, persistent_id)
+            if artwork is None:
+                self.send_error(HTTPStatus.NOT_FOUND, "Track has no artwork")
+                return
+            data, media_type = artwork
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.send_header("Content-Type", media_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if send_body:
+                self.wfile.write(data)
 
         def _audio(self, persistent_id: str, send_body: bool) -> None:
             media = track_media(snapshot, persistent_id)

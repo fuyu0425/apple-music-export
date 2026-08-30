@@ -8,8 +8,9 @@ import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
-from app import byte_range, make_handler, newest_snapshot
+from app import byte_range, decode_artwork, make_handler, newest_snapshot
 
 
 class AppTest(unittest.TestCase):
@@ -29,7 +30,7 @@ class AppTest(unittest.TestCase):
                     CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                     CREATE TABLE tracks (
                         persistent_id TEXT PRIMARY KEY, name TEXT, artist TEXT, album TEXT,
-                        location TEXT, rating INTEGER, favorited INTEGER
+                        location TEXT, duration REAL, rating INTEGER, favorited INTEGER
                     );
                     CREATE TABLE playlists (
                         persistent_id TEXT PRIMARY KEY, name TEXT, smart INTEGER
@@ -41,11 +42,13 @@ class AppTest(unittest.TestCase):
                 )
                 connection.execute("INSERT INTO metadata VALUES ('track_count', '1')")
                 connection.execute(
-                    "INSERT INTO tracks VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    ("TRACK", "Song", "Artist", "Album", str(media), 80, 1),
+                    "INSERT INTO tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("0123456789ABCDEF", "Song", "Artist", "Album", str(media), 245.5, 80, 1),
                 )
                 connection.execute("INSERT INTO playlists VALUES ('LIST', 'Favorites', 1)")
-                connection.execute("INSERT INTO track_playlists VALUES ('TRACK', 'LIST')")
+                connection.execute(
+                    "INSERT INTO track_playlists VALUES ('0123456789ABCDEF', 'LIST')"
+                )
 
             checksum = hashlib.sha256(snapshot.read_bytes()).hexdigest()
             server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(snapshot, static))
@@ -57,8 +60,19 @@ class AppTest(unittest.TestCase):
                     library = json.load(response)
                 with urllib.request.urlopen(f"{origin}/api/tracks?playlist_id=LIST") as response:
                     tracks = json.load(response)["tracks"]
+                with (
+                    mock.patch(
+                        "app.track_artwork", return_value=(b"\xff\xd8\xffimage", "image/jpeg")
+                    ),
+                    urllib.request.urlopen(
+                        f"{origin}/api/tracks/0123456789ABCDEF/artwork"
+                    ) as response,
+                ):
+                    artwork = response.read()
+                    artwork_type = response.headers["Content-Type"]
                 request = urllib.request.Request(
-                    f"{origin}/api/tracks/TRACK/audio", headers={"Range": "bytes=2-5"}
+                    f"{origin}/api/tracks/0123456789ABCDEF/audio",
+                    headers={"Range": "bytes=2-5"},
                 )
                 with urllib.request.urlopen(request) as response:
                     audio = response.read()
@@ -70,8 +84,10 @@ class AppTest(unittest.TestCase):
                 thread.join()
 
             self.assertEqual(library["playlists"][0]["name"], "Favorites")
-            self.assertEqual(tracks[0]["persistent_id"], "TRACK")
+            self.assertEqual(tracks[0]["persistent_id"], "0123456789ABCDEF")
+            self.assertEqual(tracks[0]["duration"], 245.5)
             self.assertEqual(tracks[0]["playable"], 1)
+            self.assertEqual((artwork_type, artwork), ("image/jpeg", b"\xff\xd8\xffimage"))
             self.assertEqual((status, content_range, audio), (206, "bytes 2-5/10", b"2345"))
             self.assertEqual(hashlib.sha256(snapshot.read_bytes()).hexdigest(), checksum)
 
@@ -90,6 +106,8 @@ class AppTest(unittest.TestCase):
         self.assertEqual(byte_range("bytes=-3", 10), (7, 9, True))
         with self.assertRaises(ValueError):
             byte_range("bytes=10-20", 10)
+        self.assertEqual(decode_artwork("'tdta'($FFD8FF00$)"), (b"\xff\xd8\xff\x00", "image/jpeg"))
+        self.assertIsNone(decode_artwork("missing"))
 
 
 if __name__ == "__main__":

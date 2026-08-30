@@ -41,6 +41,7 @@ const databaseIds = values(tracks, "databaseID", 0);
 const names = values(tracks, "name", "");
 const artists = values(tracks, "artist", "");
 const albums = values(tracks, "album", "");
+const durations = values(tracks, "duration", 0);
 const ratings = values(tracks, "rating", 0);
 const favorites = values(tracks, "favorited", false);
 
@@ -58,6 +59,7 @@ const trackRows = ids.map((id, i) => ({
     name: names[i],
     artist: artists[i],
     album: albums[i],
+    duration: durations[i],
     location: locations.get(id) || null,
     rating: ratings[i],
     favorited: favorites[i]
@@ -86,6 +88,7 @@ CREATE TABLE tracks (
     artist TEXT NOT NULL,
     album TEXT NOT NULL,
     location TEXT,
+    duration REAL NOT NULL CHECK (duration >= 0),
     rating INTEGER NOT NULL CHECK (rating BETWEEN 0 AND 100),
     favorited INTEGER NOT NULL CHECK (favorited IN (0, 1))
 ) STRICT;
@@ -145,10 +148,11 @@ def write_snapshot(data: dict[str, Any], output_dir: Path) -> tuple[Path, int]:
         connection.executemany(
             """
             INSERT INTO tracks (
-                persistent_id, database_id, name, artist, album, location, rating, favorited
+                persistent_id, database_id, name, artist, album, location, duration, rating,
+                favorited
             ) VALUES (
-                :persistent_id, :database_id, :name, :artist, :album, :location, :rating,
-                :favorited
+                :persistent_id, :database_id, :name, :artist, :album, :location, :duration,
+                :rating, :favorited
             )
             """,
             tracks,
@@ -174,7 +178,7 @@ def write_snapshot(data: dict[str, Any], output_dir: Path) -> tuple[Path, int]:
         connection.executemany(
             "INSERT INTO metadata (key, value) VALUES (?, ?)",
             (
-                ("schema_version", "1"),
+                ("schema_version", "2"),
                 ("exported_at", exported_at.isoformat()),
                 ("track_count", str(len(tracks))),
                 ("playlist_count", str(len(playlists))),
