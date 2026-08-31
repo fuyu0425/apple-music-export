@@ -1,5 +1,5 @@
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 
 def active_music_library() -> Path:
@@ -9,8 +9,12 @@ def active_music_library() -> Path:
         text=True,
         check=False,
     )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "lsof returned no error message."
+        raise RuntimeError(f"Could not identify the active Music library: {detail}")
+
     databases = {
-        Path(line[1:])
+        Path(line[1:]).resolve()
         for line in result.stdout.splitlines()
         if line.startswith("n") and line.endswith("/Library.musicdb")
     }
@@ -18,7 +22,11 @@ def active_music_library() -> Path:
     if len(databases) != 1:
         raise RuntimeError(f"Expected one active Music library, found {len(databases)}")
 
-    return databases.pop().parent
+    database = databases.pop()
+    if not database.is_file() or database.stat().st_size == 0:
+        raise RuntimeError(f"Active Music database is empty or missing: {database}")
+
+    return database.parent
 
 
 if __name__ == "__main__":
