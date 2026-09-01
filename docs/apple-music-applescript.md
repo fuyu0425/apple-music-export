@@ -10,7 +10,8 @@ The primary source is the installed scripting dictionary:
 
 A read-only runtime probe confirmed that the active library exposes tracks, user playlists, ratings, favorites, play counts, comments, file locations, and smart-playlist status.
 
-No live metadata writes were used during this exploration. The writable lists below come from the scripting dictionary.
+No live basic metadata writes were used during this exploration. Targeted
+artwork probes tested the data setter described below.
 
 ## Active library behavior
 
@@ -133,6 +134,31 @@ Artwork declares these properties writable:
 - `raw data`
 - `description`
 - `kind`
+
+## Observed artwork write path
+
+Two Music 1.5.6 probes started with tracks that had zero artwork. This
+AppleScript path added one JPEG artwork to each track:
+
+```applescript
+set imageData to read POSIX file imagePath as picture
+set data of artwork 1 of targetTrack to imageData
+```
+
+Music created the first artwork object through the `artwork 1` reference. A
+separate `make new artwork` command was not necessary.
+
+The scripting dictionary also marks artwork `description` as writable. Music
+1.5.6 silently discarded description values in the probes. The apply command
+therefore does not use description as provenance or as a deletion guard.
+
+The apply command records the staged file path, byte count, SHA-256 digest, and
+pre-add artwork count. It reads the live artwork bytes after the write and
+requires the same digest.
+
+Rollback deletes artwork only after a new read-only check. The recorded pre-add
+count must be zero. The track must have exactly one live artwork, and its bytes
+must match the staged digest.
 
 ## Playlist properties declared writable
 

@@ -12,6 +12,7 @@ import tempfile
 import time
 import unicodedata
 import unittest
+import urllib.error
 import wave
 from dataclasses import replace
 from pathlib import Path
@@ -76,6 +77,11 @@ class MetadataMatchTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         self.media = self.root / "Album"
         self.media.mkdir()
+        patcher = mock.patch.object(
+            BeetsMatcher, "_lookup_cover_art", return_value=("", "not_found")
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -460,6 +466,359 @@ class MetadataMatchTests(unittest.TestCase):
         )
         self.assertNotIn("Second", json.dumps(plan))
 
+    def test_empty_album_singleton_probes_supported_release_metadata(self) -> None:
+        path = self.wav("empty-album.wav")
+        track = self.track("T1", title="Old Title", album="", location=path.as_uri())
+        snapshot = self.snapshot([track])
+        audit = self.audit([self.audit_row(snapshot, track)])
+        output = self.root / "matches.csv"
+
+        import acoustid
+        import beets.autotag
+
+        results = [
+            {
+                "id": "acoustid",
+                "score": 0.99,
+                "recordings": [
+                    {
+                        "id": "recording",
+                        "releases": [
+                            {"id": release_id}
+                            for release_id in (
+                                "release-1",
+                                "release-3",
+                                "release-4",
+                                "release-5",
+                                "release-6",
+                                "release-7",
+                            )
+                        ],
+                    },
+                    {
+                        "id": "sibling-recording",
+                        "releases": [{"id": "release-2"}],
+                    },
+                ],
+            }
+        ]
+
+        def tag_item(item, search_ids):
+            self.assertEqual(search_ids, ["recording", "sibling-recording"])
+            info = SimpleNamespace(
+                title="New Title",
+                artist=item.artist,
+                length=item.length,
+                track_id="recording",
+            )
+            return self.proposal(SimpleNamespace(info=info, distance=FakeDistance(0.03)))
+
+        def tag_album(_items, search_ids):
+            self.assertEqual(
+                search_ids,
+                ["release-1", "release-3", "release-4", "release-5", "release-6"],
+            )
+            self.assertNotIn("release-2", search_ids)
+            self.assertNotIn("release-7", search_ids)
+            pseudo_release = SimpleNamespace(
+                info=SimpleNamespace(
+                    album="Romanized Album",
+                    album_id="release-1",
+                    albumstatus="Pseudo-Release",
+                    tracks=[SimpleNamespace(track_id="recording")],
+                ),
+                distance=FakeDistance(0.01),
+            )
+            official_release = SimpleNamespace(
+                info=SimpleNamespace(
+                    album="優しさの理由",
+                    album_id="release-6",
+                    albumstatus="Official",
+                    language="jpn",
+                    script="Jpan",
+                    tracks=[SimpleNamespace(track_id="recording")],
+                ),
+                distance=FakeDistance(0.02),
+            )
+            return "", "", self.proposal(pseudo_release, official_release, recommendation="low")
+
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        with (
+            mock.patch.object(acoustid, "fingerprint_file", return_value=(10.0, b"fingerprint")),
+            mock.patch.object(
+                acoustid, "lookup", return_value={"status": "ok", "results": results}
+            ),
+            mock.patch.object(beets.autotag, "tag_item", side_effect=tag_item),
+            mock.patch.object(beets.autotag, "tag_album", side_effect=tag_album),
+        ):
+            rows = generate_report(snapshot, audit, output, "key")
+
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
+        self.assertEqual(rows[0]["match_status"], "needs_review")
+        self.assertEqual(rows[0]["suggested_title"], "New Title")
+        self.assertEqual(rows[0]["suggested_album"], "優しさの理由")
+        self.assertEqual(rows[0]["musicbrainz_release_id"], "release-6")
+        self.assertEqual(rows[0]["beets_recommendation"], "strong")
+        self.assertEqual(rows[0]["beets_distance"], "0.030000")
+        self.assertIn("musicbrainz_release_status=Official", rows[0]["evidence"])
+        self.assertIn("musicbrainz_release_language=jpn", rows[0]["evidence"])
+        self.assertIn("musicbrainz_release_script=Jpan", rows[0]["evidence"])
+        self.assertIn("musicbrainz_release_probe=5/6", rows[0]["evidence"])
+        urls = rows[0]["source_urls"].split(" | ")
+        selected_release_url = "https://musicbrainz.org/release/release-6"
+        alternate_release_url = "https://musicbrainz.org/release/release-1"
+        self.assertIn("https://musicbrainz.org/recording/recording", urls)
+        self.assertLess(urls.index(selected_release_url), urls.index(alternate_release_url))
+
+        failure_output = self.root / "matches-failed-album-lookup.csv"
+        with (
+            mock.patch.object(acoustid, "fingerprint_file", return_value=(10.0, b"fingerprint")),
+            mock.patch.object(
+                acoustid, "lookup", return_value={"status": "ok", "results": results}
+            ),
+            mock.patch.object(beets.autotag, "tag_item", side_effect=tag_item),
+            mock.patch.object(
+                beets.autotag,
+                "tag_album",
+                side_effect=RuntimeError("temporary MusicBrainz failure"),
+            ),
+        ):
+            failure_rows = generate_report(snapshot, audit, failure_output, "key")
+        self.assertEqual(failure_rows[0]["match_status"], "needs_review")
+        self.assertEqual(failure_rows[0]["suggested_title"], "New Title")
+        self.assertEqual(failure_rows[0]["suggested_album"], "")
+        self.assertIn("album lookup unavailable", failure_rows[0]["evidence"])
+
+    def test_singleton_release_probe_uses_lower_retained_result(self) -> None:
+        path = self.wav("lower-result.wav")
+        track = self.track("T1", album="", location=path.as_uri())
+        snapshot = self.snapshot([track])
+        audit = self.audit([self.audit_row(snapshot, track)])
+        output = self.root / "lower-result-matches.csv"
+
+        import acoustid
+        import beets.autotag
+
+        lookup = {
+            "status": "ok",
+            "results": [
+                {
+                    "id": "top",
+                    "score": 0.95,
+                    "recordings": [{"id": "recording", "releases": []}],
+                },
+                {
+                    "id": "lower",
+                    "score": 0.8,
+                    "recordings": [
+                        {
+                            "id": "recording",
+                            "releases": [{"id": "release-lower"}],
+                        }
+                    ],
+                },
+            ],
+        }
+
+        def tag_item(item, search_ids):
+            self.assertEqual(search_ids, ["recording"])
+            info = SimpleNamespace(
+                title=item.title,
+                artist=item.artist,
+                length=item.length,
+                track_id="recording",
+            )
+            return self.proposal(SimpleNamespace(info=info, distance=FakeDistance()))
+
+        def tag_album(_items, search_ids):
+            self.assertEqual(search_ids, ["release-lower"])
+            info = SimpleNamespace(
+                album="Official Album",
+                album_id="release-lower",
+                albumstatus="Official",
+                tracks=[SimpleNamespace(track_id="recording")],
+            )
+            return "", "", self.proposal(SimpleNamespace(info=info, distance=FakeDistance()))
+
+        with (
+            mock.patch.object(acoustid, "fingerprint_file", return_value=(10.0, b"fp")),
+            mock.patch.object(acoustid, "lookup", return_value=lookup),
+            mock.patch.object(beets.autotag, "tag_item", side_effect=tag_item),
+            mock.patch.object(beets.autotag, "tag_album", side_effect=tag_album),
+        ):
+            rows = generate_report(snapshot, audit, output, "key")
+
+        self.assertEqual(rows[0]["suggested_album"], "Official Album")
+        self.assertEqual(rows[0]["musicbrainz_release_id"], "release-lower")
+        self.assertIn("musicbrainz_release_probe=1/1", rows[0]["evidence"])
+
+    def test_singleton_release_probe_skips_sibling_only_releases(self) -> None:
+        path = self.wav("sibling-only.wav")
+        track = self.track("T1", album="", location=path.as_uri())
+        snapshot = self.snapshot([track])
+        audit = self.audit([self.audit_row(snapshot, track)])
+        output = self.root / "sibling-only-matches.csv"
+
+        import acoustid
+        import beets.autotag
+
+        raw_release_ids = [f"raw-release-{index}" for index in range(1, 7)]
+        lookup = {
+            "status": "ok",
+            "results": [
+                {
+                    "id": "top",
+                    "score": 0.95,
+                    "recordings": [
+                        {"id": "recording", "releases": []},
+                        {
+                            "id": "sibling-recording",
+                            "releases": [{"id": release_id} for release_id in raw_release_ids],
+                        },
+                    ],
+                }
+            ],
+        }
+
+        def tag_item(item, search_ids):
+            self.assertEqual(search_ids, ["recording", "sibling-recording"])
+            info = SimpleNamespace(
+                title=item.title,
+                artist=item.artist,
+                length=item.length,
+                track_id="recording",
+            )
+            return self.proposal(SimpleNamespace(info=info, distance=FakeDistance()))
+
+        with (
+            mock.patch.object(acoustid, "fingerprint_file", return_value=(10.0, b"fp")),
+            mock.patch.object(acoustid, "lookup", return_value=lookup),
+            mock.patch.object(beets.autotag, "tag_item", side_effect=tag_item),
+            mock.patch.object(beets.autotag, "tag_album") as tag_album,
+        ):
+            rows = generate_report(snapshot, audit, output, "key")
+
+        tag_album.assert_not_called()
+        evidence = rows[0]["evidence"]
+        self.assertIn("no AcoustID release supports the matched recording", evidence)
+        self.assertIn("musicbrainz_release_probe=0/0", evidence)
+        self.assertIn(
+            "acoustid_release_ids=" + ",".join(raw_release_ids[:5]),
+            evidence,
+        )
+        self.assertNotIn(raw_release_ids[5], rows[0]["source_urls"])
+        for release_id in raw_release_ids[:5]:
+            self.assertIn(
+                f"https://musicbrainz.org/release/{release_id}",
+                rows[0]["source_urls"],
+            )
+
+    def test_singleton_release_probe_reports_bounded_official_omission(self) -> None:
+        path = self.wav("bounded-omission.wav")
+        track = self.track("T1", album="", location=path.as_uri())
+        snapshot = self.snapshot([track])
+        audit = self.audit([self.audit_row(snapshot, track)])
+        output = self.root / "bounded-omission-matches.csv"
+
+        import acoustid
+        import beets.autotag
+
+        release_ids = [f"release-{index}" for index in range(1, 7)]
+
+        def tag_item(item, search_ids):
+            info = SimpleNamespace(
+                title=item.title,
+                artist=item.artist,
+                length=item.length,
+                track_id=search_ids[0],
+            )
+            return self.proposal(SimpleNamespace(info=info, distance=FakeDistance()))
+
+        def tag_album(_items, search_ids):
+            self.assertEqual(search_ids, release_ids[:5])
+            pseudo_info = SimpleNamespace(
+                album="Romanized Album",
+                album_id=release_ids[0],
+                albumstatus="Pseudo-Release",
+                tracks=[SimpleNamespace(track_id="recording")],
+            )
+            return "", "", self.proposal(SimpleNamespace(info=pseudo_info, distance=FakeDistance()))
+
+        with (
+            mock.patch.object(acoustid, "fingerprint_file", return_value=(10.0, b"fp")),
+            mock.patch.object(
+                acoustid,
+                "lookup",
+                return_value=self.lookup("acoustid", "recording", release_ids),
+            ),
+            mock.patch.object(beets.autotag, "tag_item", side_effect=tag_item),
+            mock.patch.object(beets.autotag, "tag_album", side_effect=tag_album),
+        ):
+            rows = generate_report(snapshot, audit, output, "key")
+
+        self.assertEqual(rows[0]["suggested_album"], "")
+        self.assertEqual(rows[0]["musicbrainz_release_id"], "")
+        self.assertIn("musicbrainz_release_probe=5/6", rows[0]["evidence"])
+        self.assertIn(
+            "no official MusicBrainz release found in 5 of 6 recording-scoped candidates",
+            rows[0]["evidence"],
+        )
+
+    def test_singleton_release_probe_breaks_distance_ties_by_release_id(self) -> None:
+        path = self.wav("release-tie.wav")
+        track = self.track("T1", album="", location=path.as_uri())
+        snapshot = self.snapshot([track])
+        audit = self.audit([self.audit_row(snapshot, track)])
+        output = self.root / "release-tie-matches.csv"
+
+        import acoustid
+        import beets.autotag
+
+        def tag_item(item, search_ids):
+            info = SimpleNamespace(
+                title=item.title,
+                artist=item.artist,
+                length=item.length,
+                track_id=search_ids[0],
+            )
+            return self.proposal(SimpleNamespace(info=info, distance=FakeDistance()))
+
+        def album_candidate(release_id, album):
+            info = SimpleNamespace(
+                album=album,
+                album_id=release_id,
+                albumstatus="Official",
+                tracks=[SimpleNamespace(track_id="recording")],
+            )
+            return SimpleNamespace(info=info, distance=FakeDistance(0.02))
+
+        def tag_album(_items, search_ids):
+            self.assertEqual(search_ids, ["release-a", "release-b"])
+            return (
+                "",
+                "",
+                self.proposal(
+                    album_candidate("release-b", "Album B"),
+                    album_candidate("release-a", "Album A"),
+                ),
+            )
+
+        with (
+            mock.patch.object(acoustid, "fingerprint_file", return_value=(10.0, b"fp")),
+            mock.patch.object(
+                acoustid,
+                "lookup",
+                return_value=self.lookup("acoustid", "recording", ["release-b", "release-a"]),
+            ),
+            mock.patch.object(beets.autotag, "tag_item", side_effect=tag_item),
+            mock.patch.object(beets.autotag, "tag_album", side_effect=tag_album),
+        ):
+            rows = generate_report(snapshot, audit, output, "key")
+
+        self.assertEqual(rows[0]["suggested_album"], "Album A")
+        self.assertEqual(rows[0]["musicbrainz_release_id"], "release-a")
+        self.assertIn("musicbrainz_release_probe=2/2", rows[0]["evidence"])
+
     def test_acoustid_results_are_sorted_deduplicated_cached_and_limited(self) -> None:
         evidence = BeetsMatcher._parse_lookup(
             {
@@ -496,6 +855,15 @@ class MetadataMatchTests(unittest.TestCase):
             (("recording-1", 0.9), ("recording-3", 0.9), ("recording-2", 0.7)),
         )
         self.assertEqual(evidence.top_release_ids, ("release-a",))
+        self.assertEqual(
+            evidence.release_scores_for("recording-1"),
+            (("release-a", 0.9), ("release-b", 0.9)),
+        )
+        self.assertEqual(
+            evidence.release_scores_for("recording-2"),
+            (("release-2", 0.7),),
+        )
+        self.assertEqual(evidence.release_scores_for("missing"), ())
 
         paths = [self.wav("limited-one.wav"), self.wav("limited-two.wav")]
         starts: list[float] = []
@@ -559,7 +927,7 @@ class MetadataMatchTests(unittest.TestCase):
             groups = build_match_groups(loaded)
             self.assertEqual(groups, [(tracks[0],)])
 
-    def test_empty_album_singleton_never_suggests_release_metadata(self) -> None:
+    def test_empty_album_singleton_suggests_resolved_release_metadata(self) -> None:
         track = SnapshotTrack("T1", "Old", "Old Artist", "", 10.0, "file")
         row = AuditRow("snapshot", track, "review", "", "", "", "", "10", "file")
         evidence = MatchEvidence(
@@ -568,6 +936,7 @@ class MetadataMatchTests(unittest.TestCase):
             candidate_title="New",
             candidate_artist="New Artist",
             candidate_duration=10.0,
+            candidate_album="New Album",
             recommendation="strong",
             distance=0.01,
             acoustid_id="acoustid",
@@ -575,13 +944,21 @@ class MetadataMatchTests(unittest.TestCase):
             acoustid_recording_ids=frozenset({"recording"}),
             acoustid_release_ids=("release-a", "release-b"),
             recording_id="recording",
+            release_id="release-b",
+            cover_art_url=("https://coverartarchive.org/release/release-b/front-1200.jpg"),
+            cover_art_status="front",
         )
         report = make_report_row(row, evidence)
         self.assertEqual(report["match_status"], "needs_review")
         self.assertEqual(report["suggested_title"], "New")
         self.assertEqual(report["suggested_artist"], "New Artist")
-        self.assertEqual(report["suggested_album"], "")
-        self.assertEqual(report["musicbrainz_release_id"], "")
+        self.assertEqual(report["suggested_album"], "New Album")
+        self.assertEqual(report["musicbrainz_release_id"], "release-b")
+        self.assertEqual(
+            report["cover_art_url"],
+            "https://coverartarchive.org/release/release-b/front-1200.jpg",
+        )
+        self.assertIn("cover_art_archive=front", report["evidence"])
         self.assertIn("acoustid_release_ids=release-a,release-b", report["evidence"])
         self.assertIn("https://musicbrainz.org/release/release-a", report["source_urls"])
 
@@ -711,7 +1088,6 @@ class MetadataMatchTests(unittest.TestCase):
             },
         )
         self.assertEqual(make_apply_plan(snapshot, audit, report, rows[2:])["metadata_changes"], [])
-
         outputs = [self.root / "first.json", self.root / "second.json"]
         for output in outputs:
             write_apply_plan(output, plan)
@@ -720,6 +1096,48 @@ class MetadataMatchTests(unittest.TestCase):
         self.assertIn("Café".encode(), payload)
         self.assertIn(b'\n  "metadata_changes": [\n', payload)
         self.assertTrue(payload.endswith(b"\n"))
+
+    def test_apply_plan_adds_artwork_only_to_metadata_repairs(self) -> None:
+        snapshot = self.root / "snapshot.sqlite3"
+        audit = self.root / "audit.csv"
+        report = self.root / "report.csv"
+        base = {
+            "match_status": "needs_review",
+            "current_title": "Old",
+            "current_artist": "Artist",
+            "current_album": "Album",
+            "suggested_title": "New",
+            "suggested_artist": "",
+            "suggested_album": "",
+            "musicbrainz_release_id": "release-a",
+        }
+        rows = [
+            {
+                **base,
+                "persistent_id": "T1",
+                "cover_art_url": ("https://coverartarchive.org/release/release-a/front-1200.jpg"),
+            },
+            {**base, "persistent_id": "T2", "cover_art_url": ""},
+            {
+                **base,
+                "persistent_id": "T3",
+                "match_status": "no_change",
+                "suggested_title": "",
+                "cover_art_url": ("https://coverartarchive.org/release/release-a/front-1200.jpg"),
+            },
+        ]
+
+        changes = make_apply_plan(snapshot, audit, report, rows)["metadata_changes"]
+        self.assertEqual([change["persistent_id"] for change in changes], ["T1", "T2"])
+        self.assertEqual(
+            changes[0]["artwork"],
+            {
+                "source": "cover_art_archive",
+                "release_id": "release-a",
+                "url": "https://coverartarchive.org/release/release-a/front-1200.jpg",
+            },
+        )
+        self.assertNotIn("artwork", changes[1])
 
     def test_deterministic_exact_report_and_sorting(self) -> None:
         paths = [self.wav("one.wav"), self.wav("two.wav")]
@@ -982,6 +1400,137 @@ with module.BeetsMatcher('key'):
         self.assertTrue(payload["raise_on_error"])
         self.assertEqual(payload["plugins"], ["musicbrainz"])
         self.assertEqual(payload["config"], BEETS_CONFIG)
+
+
+class CoverArtLookupTests(unittest.TestCase):
+    @staticmethod
+    def response(payload: object) -> io.BytesIO:
+        return io.BytesIO(json.dumps(payload).encode())
+
+    def test_selects_first_approved_front_and_caches_release(self) -> None:
+        payload = {
+            "images": [
+                {
+                    "front": True,
+                    "approved": False,
+                    "image": "https://coverartarchive.org/release/release-a/rejected.jpg",
+                },
+                {
+                    "front": True,
+                    "approved": True,
+                    "image": "https://coverartarchive.org/release/release-a/original.jpg",
+                    "thumbnails": {
+                        "1200": ("https://coverartarchive.org/release/release-a/front-1200.jpg")
+                    },
+                },
+            ]
+        }
+        with mock.patch(
+            "apple_music_metadata_match.urllib.request.urlopen",
+            return_value=self.response(payload),
+        ) as urlopen:
+            matcher = BeetsMatcher("key")
+            expected = (
+                "https://coverartarchive.org/release/release-a/front-1200.jpg",
+                "front",
+            )
+            self.assertEqual(matcher._lookup_cover_art("release-a"), expected)
+            self.assertEqual(matcher._lookup_cover_art("release-a"), expected)
+
+        urlopen.assert_called_once()
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://coverartarchive.org/release/release-a/")
+        self.assertNotIn("release-group", request.full_url)
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(request.get_header("User-agent"), "apple-music-export/0.1")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
+
+    def test_uses_original_image_and_normalizes_cover_archive_http(self) -> None:
+        payload = {
+            "images": [
+                {
+                    "front": True,
+                    "approved": True,
+                    "image": "http://coverartarchive.org/release/release-a/original.jpg",
+                }
+            ]
+        }
+        with mock.patch(
+            "apple_music_metadata_match.urllib.request.urlopen",
+            return_value=self.response(payload),
+        ):
+            self.assertEqual(
+                BeetsMatcher("key")._lookup_cover_art("release-a"),
+                (
+                    "https://coverartarchive.org/release/release-a/original.jpg",
+                    "front",
+                ),
+            )
+
+    def test_maps_not_found_and_unavailable_without_losing_metadata(self) -> None:
+        failures = (
+            (
+                urllib.error.HTTPError("https://coverartarchive.org", 404, "missing", {}, None),
+                "not_found",
+            ),
+            (urllib.error.URLError("offline"), "unavailable"),
+            (ValueError("malformed JSON"), "unavailable"),
+        )
+        track = SnapshotTrack("T1", "Old", "Artist", "Album", 10.0, "file")
+        audit = AuditRow("snapshot", track, "review", "", "", "", "", "10", "file")
+        for failure, status in failures:
+            with self.subTest(status=status, failure=type(failure).__name__):
+                with mock.patch(
+                    "apple_music_metadata_match.urllib.request.urlopen",
+                    side_effect=failure,
+                ):
+                    url, actual_status = BeetsMatcher("key")._lookup_cover_art("release-a")
+                self.assertEqual((url, actual_status), ("", status))
+                evidence = MatchEvidence(
+                    kind="album",
+                    resolved=True,
+                    candidate_title="New",
+                    candidate_artist="Artist",
+                    candidate_album="Album",
+                    candidate_duration=10.0,
+                    recommendation="strong",
+                    acoustid_recording_ids=frozenset({"recording"}),
+                    recording_id="recording",
+                    release_id="release-a",
+                    cover_art_status=actual_status,
+                    album_all_supported=True,
+                )
+                row = make_report_row(audit, evidence)
+                self.assertEqual(row["suggested_title"], "New")
+                self.assertIn(f"cover_art_archive={status}", row["evidence"])
+
+    def test_valid_response_without_front_is_not_found_and_bad_url_is_unavailable(
+        self,
+    ) -> None:
+        payloads = (
+            ({"images": []}, "not_found"),
+            (
+                {
+                    "images": [
+                        {
+                            "front": True,
+                            "approved": True,
+                            "image": "https://example.com/release/release-a/front.jpg",
+                        }
+                    ]
+                },
+                "unavailable",
+            ),
+        )
+        for payload, status in payloads:
+            with (
+                self.subTest(status=status),
+                mock.patch(
+                    "apple_music_metadata_match.urllib.request.urlopen",
+                    return_value=self.response(payload),
+                ),
+            ):
+                self.assertEqual(BeetsMatcher("key")._lookup_cover_art("release-a"), ("", status))
 
 
 if __name__ == "__main__":

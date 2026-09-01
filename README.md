@@ -19,6 +19,7 @@ Smart playlist memberships remain read-only. Recovery only adds missing regular 
 
 - macOS with Music installed
 - Python 3.12 or later
+- Emacs 29.1 or later for the metadata review package
 - [uv](https://docs.astral.sh/uv/)
 - Node.js and npm for the snapshot browser
 - [just](https://github.com/casey/just) for the provided task commands
@@ -113,6 +114,22 @@ Both output paths must be new and must identify different files. Unicode-normali
 
 The command fingerprints readable media files with `fpcalc`. It sends fingerprints and durations to AcoustID, then queries MusicBrainz through beets.
 
+For a singleton with an empty current album, the matcher scopes AcoustID
+releases to the recording that beets selected. It orders releases by descending
+AcoustID score and then release ID, and fetches at most five. A candidate must
+contain the selected recording and have the exact MusicBrainz status `Official`.
+The matcher chooses the lowest beets distance and then release ID. The report
+includes probed and available counts. An omission describes only the bounded
+probe. The row remains `needs_review`.
+
+This extra probe does not replace the singleton title, artist, score, or
+distance. If the release lookup fails, the report keeps the singleton result
+and records the lookup error as evidence.
+
+For an exact MusicBrainz release match, the matcher queries the Cover Art
+Archive. It accepts the first approved front image and records the image URL.
+An unavailable image does not remove the metadata proposal.
+
 The command publishes both artifacts only after all matching succeeds. A network or plan-writing failure does not leave a partial command result.
 
 ### Read the report
@@ -135,6 +152,7 @@ Use these fields during review:
 - `beets_recommendation`, `beets_distance`, and `distance_penalties` explain the beets ranking.
 - `evidence` combines the private audit evidence with matching diagnostics.
 - `source_urls` links to the relevant AcoustID and MusicBrainz records.
+- `cover_art_url` identifies the exact-release front image when one is available.
 
 A `strong_candidate` is still a review proposal. The command never applies the suggestion.
 
@@ -144,9 +162,99 @@ The JSON plan keeps the report order. It includes each `strong_candidate` or `ne
 
 Each entry includes all current metadata fields. Its `suggested` object includes only nonempty `title`, `artist`, and `album` changes.
 
+When an exact-release front image is available, the entry also includes an
+`artwork` object with its Cover Art Archive source, MusicBrainz release ID, and
+HTTPS URL.
+
 Every entry has `"approved": false`, including each strong candidate. A run with no eligible suggestion writes an empty `metadata_changes` list.
 
-The plan supports manual review only. It does not apply metadata.
+The plan supports manual review only. It does not apply metadata or artwork.
+
+### Review needs-review entries in Emacs
+
+Install the standalone package:
+
+```text
+M-x package-install-file
+apple-music-metadata-review.el
+```
+
+Open the generated plan:
+
+```text
+M-x apple-music-metadata-review-open
+/path/to/metadata-apply-plan.json
+```
+
+The package reads the linked review report and displays only the plan's `needs_review` entries. It leaves strong candidates untouched.
+
+The overview uses separate current and suggested columns for title, artist, and album. Use a window about 150 columns wide. Approval counts stay in the mode line.
+The detail buffer shows the artwork action and Cover Art Archive link when the
+plan contains artwork.
+
+Approval changes the whole entry's `approved` value. Saving writes an Emacs backup before it updates the plan.
+
+The package never applies metadata. It does not change Apple Music, media files, snapshots, audits, or review reports.
+
+| Key | Overview | Detail buffer |
+| --- | --- | --- |
+| `RET` | Open the selected entry | — |
+| `SPC` | Toggle approval | Toggle approval |
+| `a` | Approve the entry | Approve the entry |
+| `!` | Approve, then select the next entry | Approve, then show the next entry |
+| `u` | Unapprove the entry | Unapprove the entry |
+| `n` | — | Show the next entry |
+| `p` | — | Show the previous entry |
+| `C-x C-s` | Save the plan | Save through the overview |
+| `g` | Reload the plan and report | — |
+| `q` | — | Close the detail window |
+
+When Evil is loaded, both review buffers use motion state. Use `gr` to reload in Evil. The other review keys stay the same.
+
+Use these actions when the package reports a review error:
+
+| Error | Action |
+| --- | --- |
+| `Review report is not readable: PATH` | Restore the linked report at `PATH`, then open or reload the plan. |
+| `Apply plan and review report disagree for persistent_id: ID` | Regenerate a matching plan and report pair. |
+| `Apply plan changed; press g to reload before saving` | Press `g` in the overview to load the external plan change. |
+
+### Dry-run approved metadata and artwork
+
+Keep Music open with the intended library active. Use the same package path for
+`--library` that Music currently uses.
+
+Run the command without `--apply` first:
+
+```bash
+uv run --group metadata python apple_music_metadata_apply.py \
+  --plan snapshots/reviewed-metadata-apply-plan.json \
+  --library "/path/to/Music Library.musiclibrary" \
+  --output snapshots/metadata-apply-dry-run
+```
+
+The command rejects an empty approved set. It then backs up the library package,
+exports current state, stages approved artwork, and checks every live value.
+The dry run does not change Music.
+
+Review `result.json`. Use a new output directory and add `--apply` only after
+the dry run has no error:
+
+```bash
+uv run --group metadata python apple_music_metadata_apply.py \
+  --plan snapshots/reviewed-metadata-apply-plan.json \
+  --library "/path/to/Music Library.musiclibrary" \
+  --output snapshots/metadata-apply-live \
+  --apply
+```
+
+The apply command updates only approved fields whose live values still match
+the plan. It adds artwork only when the track has none. It verifies added image
+bytes by SHA-256 and exports `after.sqlite3`.
+
+If a later step fails, the command restores changed metadata. It deletes
+created artwork only when the recorded pre-add count was zero, one live artwork
+remains, and its bytes match the staged SHA-256 digest.
 
 ### Fix setup errors
 
@@ -225,6 +333,8 @@ Each live run retains its package backup, `current.sqlite3`, `target.sqlite3`, `
 ```bash
 just check
 ```
+
+This command runs the ERT package suite. Emacs 29.1 or later is required.
 
 ## Privacy
 

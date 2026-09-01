@@ -12,7 +12,7 @@ The useful path is:
 4. Resolve AcoustID recording and release IDs through the beets MusicBrainz plugin.
 5. Run beets singleton or album matching to get ranked `TrackMatch` or `AlbumMatch` proposals.
 6. Add the proposal, distance components, MusicBrainz IDs, AcoustID score, and source URLs to a review report.
-7. Apply no metadata until a separate reviewed apply step exists.
+7. Apply only explicitly approved changes through the guarded Apple Music apply command.
 
 This uses the difficult parts that beets already solves. It keeps this project in control of snapshot identity, review status, and Apple Music updates.
 
@@ -20,9 +20,27 @@ This uses the difficult parts that beets already solves. It keeps this project i
 
 ### Acoustic identification
 
-The `chroma` plugin uses `pyacoustid` and Chromaprint. It fingerprints a file, queries AcoustID, rejects a top result below `0.5`, and extracts MusicBrainz recording and release IDs. It then asks the MusicBrainz plugin for full candidates. The plugin limits a singleton lookup to five recordings and an album lookup to five releases.
+The `chroma` plugin uses `pyacoustid` and Chromaprint. It fingerprints a file,
+queries AcoustID, rejects a top result below `0.5`, and extracts MusicBrainz
+recording and release IDs. It then asks the MusicBrainz plugin for full
+candidates. The plugin limits a singleton lookup to five recordings and an
+album lookup to five releases. For missing-album singletons, the matcher scopes
+releases to the recording that beets selected and fetches at most five.
 
-Acoustic identity is candidate evidence, not complete release metadata. The same recording can occur on an original release, compilation, remaster, or regional release. Album-level matching must choose the release.
+Acoustic identity is candidate evidence, not complete release metadata. The same recording can occur on an original release, compilation, remaster, or regional release. Album-level matching must choose the release for strong results.
+
+An empty-album singleton can use a best-effort release probe. The probe scopes
+AcoustID releases to the recording that beets selected. It orders releases by
+descending AcoustID score and then release ID, and fetches at most five. A
+candidate must contain the selected recording and have the exact MusicBrainz
+status `Official`. The matcher chooses the lowest beets distance and then
+release ID. Evidence includes probed and available counts. An omission reason
+describes only the bounded probe. The probe never upgrades the singleton beyond
+`needs_review`.
+
+For an exact MusicBrainz release, query the Cover Art Archive for its approved
+front image. Record the source URL as review evidence. Add the image only after
+the reviewer approves the related metadata entry.
 
 Sources:
 
@@ -90,7 +108,10 @@ A beets `strong` recommendation alone must not change metadata. Confirm a repair
 
 Keep other results as `needs_review`. Store the candidate distance and each penalty. A single numeric confidence value hides why a match failed.
 
-For native-script repairs, leave the beets `languages` preference empty during identification. Beets documents that a language preference can select aliases or transliterations. Preserve both the canonical MusicBrainz value and the credited release value in evidence.
+For native-script repairs, leave the beets `languages` preference empty during
+identification. Beets documents that a language preference can select aliases
+or transliterations. Evidence records the selected release status, language,
+and script. It also preserves canonical MusicBrainz and credited release values.
 
 ## Minimal first implementation
 
@@ -104,11 +125,23 @@ beets_recommendation,beets_distance,distance_penalties,proposed_title,
 proposed_artist,proposed_album,evidence,source_urls
 ```
 
-Process album directories as albums when at least two snapshot tracks share the same album and directory. Process the remaining tracks as singletons. Cache fingerprints and API results by normalized path and file size plus modification time.
+Process album directories as albums when at least two snapshot tracks share the
+same album and directory. Process the remaining tracks as singletons. After
+beets selects a recording for an empty-album singleton, scope AcoustID releases
+to that recording. Order releases by descending AcoustID score and then release
+ID, and fetch at most five. Require the selected recording and the exact
+MusicBrainz status `Official`. Choose the lowest beets distance and then release
+ID. Record probed and available counts. Limit an omission reason to the bounded
+probe. Cache fingerprints and API results by normalized path and file size plus
+modification time.
 
 Install beets and chroma support as an optional tool dependency. The chroma documentation requires `beets[chroma]` and Chromaprint or `fpcalc`. On macOS, Homebrew provides `chromaprint`.
 
-After the proposal quality is known, add an explicit reviewed apply command. That command should use the same backup, dry-run, and post-export checks as the existing recovery flow. It must never edit `Library.musicdb` directly.
+The reviewed apply command uses the existing recovery flow's backup, dry-run,
+live preflight, rollback, and post-export checks. It updates Music through its
+scripting interface and never edits `Library.musicdb` directly. Artwork is
+optional. The command adds it only when the track has no artwork and verifies
+the added bytes against the staged SHA-256 digest.
 
 ## What to skip
 

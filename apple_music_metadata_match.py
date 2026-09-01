@@ -12,6 +12,8 @@ import tempfile
 import threading
 import time
 import unicodedata
+import urllib.error
+import urllib.request
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -56,6 +58,7 @@ REPORT_HEADER = [
     "acoustid_score",
     "musicbrainz_recording_id",
     "musicbrainz_release_id",
+    "cover_art_url",
     "beets_recommendation",
     "beets_distance",
     "distance_penalties",
@@ -112,12 +115,19 @@ class _FingerprintEvidence:
     score: float | None = None
     recording_scores: tuple[tuple[str, float], ...] = ()
     release_scores: tuple[tuple[str, float], ...] = ()
+    recording_release_scores: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = ()
     top_release_ids: tuple[str, ...] = ()
     error: str = ""
 
     @property
     def recording_ids(self) -> frozenset[str]:
         return frozenset(recording_id for recording_id, _ in self.recording_scores)
+
+    def release_scores_for(self, recording_id: str) -> tuple[tuple[str, float], ...]:
+        for candidate_id, release_scores in self.recording_release_scores:
+            if candidate_id == recording_id:
+                return release_scores
+        return ()
 
 
 @dataclass(frozen=True)
@@ -139,6 +149,13 @@ class MatchEvidence:
     acoustid_release_ids: tuple[str, ...] = ()
     recording_id: str = ""
     release_id: str = ""
+    cover_art_url: str = ""
+    cover_art_status: str = ""
+    release_status: str = ""
+    release_language: str = ""
+    release_script: str = ""
+    release_probe_available: int | None = None
+    release_probe_count: int | None = None
     extra_items: int = 0
     extra_tracks: int = 0
     album_all_supported: bool = False
@@ -302,6 +319,7 @@ class BeetsMatcher:
         self._item_class: Any = None
         self._fingerprints: dict[str, _FingerprintEvidence] = {}
         self._items: dict[str, Any] = {}
+        self._cover_art: dict[str, tuple[str, str]] = {}
 
     def __enter__(self) -> Self:
         self._temporary_directory = tempfile.TemporaryDirectory(prefix="apple-music-beets-")
@@ -431,6 +449,7 @@ class BeetsMatcher:
 
         recording_scores: dict[str, float] = {}
         release_scores: dict[str, float] = {}
+        recording_release_scores: dict[str, dict[str, float]] = {}
         top_release_ids: set[str] = set()
         for result_index, (score, _acoustid_id, recordings) in enumerate(retained):
             for recording in recordings:
@@ -439,10 +458,17 @@ class BeetsMatcher:
                     recording_scores[recording_id] = max(
                         score, recording_scores.get(recording_id, 0.0)
                     )
+                    scoped_release_scores = recording_release_scores.setdefault(recording_id, {})
+                else:
+                    scoped_release_scores = None
                 for release in recording.get("releases", []):
                     release_id = release.get("id") if isinstance(release, dict) else None
                     if isinstance(release_id, str):
                         release_scores[release_id] = max(score, release_scores.get(release_id, 0.0))
+                        if scoped_release_scores is not None:
+                            scoped_release_scores[release_id] = max(
+                                score, scoped_release_scores.get(release_id, 0.0)
+                            )
                         if result_index == 0:
                             top_release_ids.add(release_id)
 
@@ -456,6 +482,13 @@ class BeetsMatcher:
             release_scores=tuple(
                 sorted(release_scores.items(), key=lambda pair: (-pair[1], pair[0]))
             ),
+            recording_release_scores=tuple(
+                (
+                    recording_id,
+                    tuple(sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))),
+                )
+                for recording_id, scores in sorted(recording_release_scores.items())
+            ),
             top_release_ids=tuple(sorted(top_release_ids)),
         )
 
@@ -467,6 +500,64 @@ class BeetsMatcher:
     def _recommendation(proposal: Any) -> str:
         name = getattr(proposal.recommendation, "name", str(proposal.recommendation))
         return name if name in {"strong", "medium", "low", "none"} else "none"
+
+    def _lookup_cover_art(self, release_id: str) -> tuple[str, str]:
+        cached = self._cover_art.get(release_id)
+        if cached is not None:
+            return cached
+
+        request = urllib.request.Request(
+            f"https://coverartarchive.org/release/{release_id}/",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "apple-music-export/0.1",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            result = ("", "not_found" if error.code == 404 else "unavailable")
+        except (OSError, ValueError, TypeError):
+            result = ("", "unavailable")
+        else:
+            result = ("", "not_found")
+            images = payload.get("images") if isinstance(payload, dict) else None
+            if not isinstance(images, list):
+                result = ("", "unavailable")
+            else:
+                for image in images:
+                    if (
+                        not isinstance(image, dict)
+                        or image.get("front") is not True
+                        or image.get("approved") is not True
+                    ):
+                        continue
+                    thumbnails = image.get("thumbnails")
+                    url = (
+                        thumbnails.get("1200")
+                        if isinstance(thumbnails, dict) and isinstance(thumbnails.get("1200"), str)
+                        else image.get("image")
+                    )
+                    if not isinstance(url, str):
+                        result = ("", "unavailable")
+                        break
+                    parsed = urlparse(url)
+                    if parsed.scheme == "http" and parsed.hostname == "coverartarchive.org":
+                        url = parsed._replace(scheme="https").geturl()
+                        parsed = urlparse(url)
+                    if (
+                        parsed.scheme != "https"
+                        or parsed.hostname != "coverartarchive.org"
+                        or not parsed.path.startswith(f"/release/{release_id}/")
+                    ):
+                        result = ("", "unavailable")
+                    else:
+                        result = (url, "front")
+                    break
+
+        self._cover_art[release_id] = result
+        return result
 
     @staticmethod
     def _base(kind: str, fingerprint: _FingerprintEvidence) -> dict[str, Any]:
@@ -486,20 +577,88 @@ class BeetsMatcher:
         recording_ids = [recording_id for recording_id, _ in fingerprint.recording_scores][:5]
         if not recording_ids:
             return MatchEvidence(reason="no AcoustID result reached 0.5", **base)
-        proposal = self._autotag.tag_item(self._item(track), search_ids=recording_ids)
+        item = self._item(track)
+        proposal = self._autotag.tag_item(item, search_ids=recording_ids)
         if not proposal.candidates:
             return MatchEvidence(reason="no MusicBrainz candidate resolved", **base)
         candidate = proposal.candidates[0]
         info = candidate.info
+        candidate_album = ""
+        release_id = ""
+        reason = ""
+        release_status = ""
+        release_language = ""
+        release_script = ""
+        release_probe_available = None
+        release_probe_count = None
+        if not track.album:
+            base["acoustid_release_ids"] = base["acoustid_release_ids"][:5]
+            recording_release_scores = fingerprint.release_scores_for(info.track_id or "")
+            release_probe_available = len(recording_release_scores)
+            release_ids = [release_id for release_id, _ in recording_release_scores[:5]]
+            release_probe_count = len(release_ids)
+            if not release_ids:
+                reason = "no AcoustID release supports the matched recording"
+            else:
+                base["acoustid_release_ids"] = tuple(release_ids)
+                try:
+                    _, _, album_proposal = self._autotag.tag_album([item], search_ids=release_ids)
+                    eligible_candidates = [
+                        album_candidate
+                        for album_candidate in album_proposal.candidates
+                        if getattr(album_candidate.info, "albumstatus", None) == "Official"
+                        and any(
+                            getattr(release_track, "track_id", "") == info.track_id
+                            for release_track in (getattr(album_candidate.info, "tracks", ()) or ())
+                        )
+                    ]
+                    if eligible_candidates:
+                        album_candidate = min(
+                            eligible_candidates,
+                            key=lambda candidate: (
+                                float(candidate.distance),
+                                getattr(candidate.info, "album_id", "") or "",
+                            ),
+                        )
+                        candidate_album = getattr(album_candidate.info, "album", "") or ""
+                        release_id = getattr(album_candidate.info, "album_id", "") or ""
+                        release_status = getattr(album_candidate.info, "albumstatus", "") or ""
+                        release_language = getattr(album_candidate.info, "language", "") or ""
+                        release_script = getattr(album_candidate.info, "script", "") or ""
+                    else:
+                        reason = (
+                            "no official MusicBrainz release found in "
+                            f"{release_probe_count} of {release_probe_available} "
+                            "recording-scoped candidates"
+                        )
+                except (OSError, RuntimeError, ValueError) as error:
+                    reason = f"album lookup unavailable: {error}"
+            if release_id:
+                base["acoustid_release_ids"] = tuple(
+                    dict.fromkeys((release_id, *base["acoustid_release_ids"]))
+                )[:5]
+        cover_art_url, cover_art_status = (
+            self._lookup_cover_art(release_id) if release_id else ("", "")
+        )
         return MatchEvidence(
             resolved=True,
+            reason=reason,
             candidate_title=info.title or "",
             candidate_artist=info.artist or "",
+            candidate_album=candidate_album,
             candidate_duration=info.length,
             recommendation=self._recommendation(proposal),
             distance=float(candidate.distance),
             penalties=self._penalties(candidate),
             recording_id=info.track_id or "",
+            release_id=release_id,
+            release_status=release_status,
+            release_language=release_language,
+            release_script=release_script,
+            cover_art_url=cover_art_url,
+            cover_art_status=cover_art_status,
+            release_probe_available=release_probe_available,
+            release_probe_count=release_probe_count,
             **base,
         )
 
@@ -530,6 +689,10 @@ class BeetsMatcher:
         item_mapping = tuple(
             sorted((track.persistent_id, info.track_id or "") for track, info in mapped.items())
         )
+        release_id = candidate.info.album_id or ""
+        cover_art_url, cover_art_status = (
+            self._lookup_cover_art(release_id) if release_id else ("", "")
+        )
         results: dict[str, MatchEvidence] = {}
         for track in tracks:
             fingerprint = fingerprints[track.persistent_id]
@@ -553,7 +716,9 @@ class BeetsMatcher:
                 distance=float(candidate.distance),
                 penalties=self._penalties(candidate),
                 recording_id=info.track_id or "",
-                release_id=candidate.info.album_id or "",
+                release_id=release_id,
+                cover_art_url=cover_art_url,
+                cover_art_status=cover_art_status,
                 extra_items=len(candidate.extra_items),
                 extra_tracks=len(candidate.extra_tracks),
                 album_all_supported=all_supported,
@@ -642,6 +807,19 @@ def _evidence_tokens(evidence: MatchEvidence) -> list[str]:
         tokens.append(f"musicbrainz_recording_id={evidence.recording_id}")
     if evidence.release_id:
         tokens.append(f"musicbrainz_release_id={evidence.release_id}")
+    if evidence.release_status:
+        tokens.append(f"musicbrainz_release_status={evidence.release_status}")
+    if evidence.release_language:
+        tokens.append(f"musicbrainz_release_language={evidence.release_language}")
+    if evidence.release_script:
+        tokens.append(f"musicbrainz_release_script={evidence.release_script}")
+    if evidence.cover_art_status:
+        tokens.append(f"cover_art_archive={evidence.cover_art_status}")
+    if evidence.release_probe_count is not None and evidence.release_probe_available is not None:
+        tokens.append(
+            "musicbrainz_release_probe="
+            f"{evidence.release_probe_count}/{evidence.release_probe_available}"
+        )
     if evidence.kind == "album" and evidence.resolved:
         tokens.extend(
             (
@@ -664,8 +842,15 @@ def _source_urls(evidence: MatchEvidence) -> list[str]:
         urls.append(f"https://acoustid.org/track/{evidence.acoustid_id}")
     if evidence.recording_id:
         urls.append(f"https://musicbrainz.org/recording/{evidence.recording_id}")
-    release_ids = (evidence.release_id,) if evidence.release_id else evidence.acoustid_release_ids
-    urls.extend(f"https://musicbrainz.org/release/{release_id}" for release_id in release_ids)
+    if evidence.release_id:
+        urls.append(f"https://musicbrainz.org/release/{evidence.release_id}")
+        if evidence.cover_art_url:
+            urls.append(evidence.cover_art_url)
+    urls.extend(
+        f"https://musicbrainz.org/release/{release_id}"
+        for release_id in evidence.acoustid_release_ids
+        if release_id != evidence.release_id
+    )
     return urls
 
 
@@ -679,7 +864,7 @@ def make_report_row(row: AuditRow, evidence: MatchEvidence) -> dict[str, str]:
     suggested_artist = evidence.candidate_artist if can_suggest and artist_differs else ""
     suggested_album = (
         evidence.candidate_album
-        if can_suggest and evidence.kind == "album" and album_differs
+        if (can_suggest and album_differs and (evidence.kind == "album" or not row.track.album))
         else ""
     )
     penalties = {key: value for key, value in evidence.penalties}
@@ -700,7 +885,8 @@ def make_report_row(row: AuditRow, evidence: MatchEvidence) -> dict[str, str]:
             f"{evidence.acoustid_score:.6f}" if evidence.acoustid_score is not None else ""
         ),
         "musicbrainz_recording_id": evidence.recording_id,
-        "musicbrainz_release_id": evidence.release_id if evidence.kind == "album" else "",
+        "musicbrainz_release_id": evidence.release_id,
+        "cover_art_url": evidence.cover_art_url,
         "beets_recommendation": evidence.recommendation,
         "beets_distance": f"{evidence.distance:.6f}" if evidence.distance is not None else "",
         "distance_penalties": (
@@ -743,19 +929,25 @@ def make_apply_plan(
         }
         if row["match_status"] not in {"strong_candidate", "needs_review"} or not suggested:
             continue
-        metadata_changes.append(
-            {
-                "persistent_id": row["persistent_id"],
-                "approved": False,
-                "match_status": row["match_status"],
-                "current": {
-                    "title": row["current_title"],
-                    "artist": row["current_artist"],
-                    "album": row["current_album"],
-                },
-                "suggested": suggested,
+        change: dict[str, Any] = {
+            "persistent_id": row["persistent_id"],
+            "approved": False,
+            "match_status": row["match_status"],
+            "current": {
+                "title": row["current_title"],
+                "artist": row["current_artist"],
+                "album": row["current_album"],
+            },
+            "suggested": suggested,
+        }
+        cover_art_url = row.get("cover_art_url", "")
+        if cover_art_url:
+            change["artwork"] = {
+                "source": "cover_art_archive",
+                "release_id": row["musicbrainz_release_id"],
+                "url": cover_art_url,
             }
-        )
+        metadata_changes.append(change)
     return {
         "snapshot": str(snapshot.resolve()),
         "audit": str(audit.resolve()),
