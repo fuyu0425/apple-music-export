@@ -608,6 +608,22 @@ number.  Record separators and quoted CRLF sequences normalize to newlines."
           (apple-music-metadata-review--write-plan)
         (message "No approval changes to save")))))
 
+(defun apple-music-metadata-review-save-and-quit ()
+  "Save approvals and close the review buffers."
+  (interactive)
+  (let ((overview (apple-music-metadata-review--overview)))
+    (with-current-buffer overview
+      (apple-music-metadata-review-save)
+      (kill-buffer overview))))
+
+(defun apple-music-metadata-review-discard-and-quit ()
+  "Discard unsaved approvals and close the review buffers."
+  (interactive)
+  (let ((overview (apple-music-metadata-review--overview)))
+    (with-current-buffer overview
+      (set-buffer-modified-p nil)
+      (kill-buffer overview))))
+
 (defun apple-music-metadata-review-reload ()
   "Reload the apply plan and its linked report from disk."
   (interactive)
@@ -663,6 +679,8 @@ number.  Record separators and quoted CRLF sequences normalize to newlines."
   "RET" #'apple-music-metadata-review-show-details
   "SPC" #'apple-music-metadata-review-toggle
   "C-x C-s" #'apple-music-metadata-review-save
+  "C-c C-c" #'apple-music-metadata-review-save-and-quit
+  "C-c C-k" #'apple-music-metadata-review-discard-and-quit
   "a" #'apple-music-metadata-review-approve
   "!" #'apple-music-metadata-review-approve-and-next
   "u" #'apple-music-metadata-review-unapprove
@@ -857,6 +875,8 @@ number.  Record separators and quoted CRLF sequences normalize to newlines."
   "n" #'apple-music-metadata-review-next
   "p" #'apple-music-metadata-review-previous
   "C-x C-s" #'apple-music-metadata-review-save
+  "C-c C-c" #'apple-music-metadata-review-save-and-quit
+  "C-c C-k" #'apple-music-metadata-review-discard-and-quit
   "q" #'apple-music-metadata-review-quit-detail)
 
 (define-derived-mode apple-music-metadata-review-detail-mode special-mode

@@ -206,6 +206,8 @@ The package never applies metadata. It does not change Apple Music, media files,
 | `n` | — | Show the next entry |
 | `p` | — | Show the previous entry |
 | `C-x C-s` | Save the plan | Save through the overview |
+| `C-c C-c` | Save approvals and exit | Save approvals and exit |
+| `C-c C-k` | Discard unsaved approvals and exit | Discard unsaved approvals and exit |
 | `g` | Reload the plan and report | — |
 | `q` | — | Close the detail window |
 

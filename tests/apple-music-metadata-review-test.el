@@ -463,6 +463,59 @@
          (= (- (line-number-at-pos) (line-number-at-pos (window-start window)))
             5))))))
 
+(ert-deftest apple-music-metadata-review-save-and-quit-key ()
+  (let ((change (apple-music-metadata-review-test--change
+                 "N1" "needs_review" "First" '((title . "First new"))))
+        (row (apple-music-metadata-review-test--row
+              "N1" "needs_review" "First" "First new")))
+    (apple-music-metadata-review-test--with-fixture
+        (fixture (list change) (list row))
+      (let ((plan-file (plist-get fixture :plan-file)))
+        (apple-music-metadata-review-open plan-file)
+        (should
+         (eq (lookup-key apple-music-metadata-review-mode-map (kbd "C-c C-c"))
+             #'apple-music-metadata-review-save-and-quit))
+        (goto-char (point-min))
+        (apple-music-metadata-review-approve)
+        (let ((overview (current-buffer)))
+          (apple-music-metadata-review-show-details)
+          (let ((detail (current-buffer)))
+            (should
+             (eq (lookup-key apple-music-metadata-review-detail-mode-map
+                             (kbd "C-c C-c"))
+                 #'apple-music-metadata-review-save-and-quit))
+            (execute-kbd-macro (kbd "C-c C-c"))
+            (should-not (buffer-live-p overview))
+            (should-not (buffer-live-p detail))))
+        (let* ((saved (apple-music-metadata-review-test--read-plan plan-file))
+               (saved-change (aref (alist-get 'metadata_changes saved) 0)))
+          (should (eq (alist-get 'approved saved-change) t)))))))
+
+(ert-deftest apple-music-metadata-review-discard-and-quit-key ()
+  (let ((change (apple-music-metadata-review-test--change
+                 "N1" "needs_review" "First" '((title . "First new"))))
+        (row (apple-music-metadata-review-test--row
+              "N1" "needs_review" "First" "First new")))
+    (apple-music-metadata-review-test--with-fixture
+        (fixture (list change) (list row))
+      (let ((plan-file (plist-get fixture :plan-file)))
+        (apple-music-metadata-review-open plan-file)
+        (should
+         (eq (lookup-key apple-music-metadata-review-mode-map (kbd "C-c C-k"))
+             #'apple-music-metadata-review-discard-and-quit))
+        (should
+         (eq (lookup-key apple-music-metadata-review-detail-mode-map
+                         (kbd "C-c C-k"))
+             #'apple-music-metadata-review-discard-and-quit))
+        (goto-char (point-min))
+        (apple-music-metadata-review-approve)
+        (let ((overview (current-buffer)))
+          (execute-kbd-macro (kbd "C-c C-k"))
+          (should-not (buffer-live-p overview)))
+        (let* ((saved (apple-music-metadata-review-test--read-plan plan-file))
+               (saved-change (aref (alist-get 'metadata_changes saved) 0)))
+          (should (eq (alist-get 'approved saved-change) :json-false)))))))
+
 (ert-deftest apple-music-metadata-review-navigation-follows-visible-sort-order ()
   (let* ((first (apple-music-metadata-review-test--change
                  "N1" "needs_review" "First" '((title . "First new"))))
