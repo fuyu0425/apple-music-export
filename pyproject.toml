@@ -11,6 +11,11 @@ dev = [
     "ruff>=0.12.0",
 ]
 
+metadata = [
+    "beets[chroma]==2.13.1",
+    "python-dotenv>=1.2.3",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
