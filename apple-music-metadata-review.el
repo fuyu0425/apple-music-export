@@ -438,6 +438,11 @@ number.  Record separators and quoted CRLF sequences normalize to newlines."
 
 (defun apple-music-metadata-review--refresh (&optional keep-id)
   (let* ((modified (buffer-modified-p))
+         (window (get-buffer-window (current-buffer) t))
+         (viewport-line
+          (and window
+               (- (line-number-at-pos)
+                  (line-number-at-pos (window-start window)))))
          (approved
           (seq-count
            (lambda (entry) (eq (alist-get 'approved (car entry)) t))
@@ -452,6 +457,14 @@ number.  Record separators and quoted CRLF sequences normalize to newlines."
     (tabulated-list-init-header)
     (tabulated-list-print t)
     (apple-music-metadata-review--goto-id keep-id)
+    (when (and window
+               (window-live-p window)
+               (eq (window-buffer window) (current-buffer)))
+      (set-window-start
+       window
+       (save-excursion
+         (forward-line (- viewport-line))
+         (line-beginning-position))))
     (set-buffer-modified-p modified)))
 
 (defun apple-music-metadata-review--overview ()

@@ -428,6 +428,41 @@
              t)))
       (should (equal apple-music-metadata-review--entry-id "N2")))))
 
+(ert-deftest apple-music-metadata-review-approval-keeps-viewport-position ()
+  (let* ((ids (mapcar (lambda (index) (format "N%02d" index))
+                      (number-sequence 1 40)))
+         (changes
+          (mapcar
+           (lambda (id)
+             (apple-music-metadata-review-test--change
+              id "needs_review" id `((title . ,(concat id " new")))))
+           ids))
+         (rows
+          (mapcar
+           (lambda (id)
+             (apple-music-metadata-review-test--row
+              id "needs_review" id (concat id " new")))
+           ids)))
+    (apple-music-metadata-review-test--with-fixture
+        (fixture changes rows)
+      (apple-music-metadata-review-open (plist-get fixture :plan-file))
+      (goto-char (point-min))
+      (forward-line 19)
+      (let* ((window (selected-window))
+             (row-line (line-number-at-pos))
+             (start
+              (save-excursion
+                (forward-line -5)
+                (line-beginning-position))))
+        (set-window-start window start)
+        (redisplay t)
+        (should (= (- row-line (line-number-at-pos (window-start window))) 5))
+        (apple-music-metadata-review-approve)
+        (redisplay t)
+        (should
+         (= (- (line-number-at-pos) (line-number-at-pos (window-start window)))
+            5))))))
+
 (ert-deftest apple-music-metadata-review-navigation-follows-visible-sort-order ()
   (let* ((first (apple-music-metadata-review-test--change
                  "N1" "needs_review" "First" '((title . "First new"))))
