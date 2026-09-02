@@ -44,6 +44,7 @@ const albums = values(tracks, "album", "");
 const durations = values(tracks, "duration", 0);
 const ratings = values(tracks, "rating", 0);
 const favorites = values(tracks, "favorited", false);
+const playedDates = values(tracks, "playedDate", null);
 
 const fileTracks = library.fileTracks;
 const fileIds = values(fileTracks, "persistentID", "");
@@ -62,7 +63,8 @@ const trackRows = ids.map((id, i) => ({
     duration: durations[i],
     location: locations.get(id) || null,
     rating: ratings[i],
-    favorited: favorites[i]
+    favorited: favorites[i],
+    last_played_at: playedDates[i] === null ? null : playedDates[i].toISOString()
 }));
 
 const playlistRows = music.userPlaylists().map(playlist => ({
@@ -88,6 +90,7 @@ CREATE TABLE tracks (
     artist TEXT NOT NULL,
     album TEXT NOT NULL,
     location TEXT,
+    last_played_at TEXT,
     duration REAL NOT NULL CHECK (duration >= 0),
     rating INTEGER NOT NULL CHECK (rating BETWEEN 0 AND 100),
     favorited INTEGER NOT NULL CHECK (favorited IN (0, 1))
@@ -149,13 +152,13 @@ def write_snapshot(data: dict[str, Any], output_dir: Path) -> tuple[Path, int]:
             """
             INSERT INTO tracks (
                 persistent_id, database_id, name, artist, album, location, duration, rating,
-                favorited
+                favorited, last_played_at
             ) VALUES (
                 :persistent_id, :database_id, :name, :artist, :album, :location, :duration,
-                :rating, :favorited
+                :rating, :favorited, :last_played_at
             )
             """,
-            tracks,
+            ({**track, "last_played_at": track.get("last_played_at")} for track in tracks),
         )
         connection.executemany(
             "INSERT INTO playlists (persistent_id, name, smart) VALUES (?, ?, ?)",
@@ -178,7 +181,7 @@ def write_snapshot(data: dict[str, Any], output_dir: Path) -> tuple[Path, int]:
         connection.executemany(
             "INSERT INTO metadata (key, value) VALUES (?, ?)",
             (
-                ("schema_version", "2"),
+                ("schema_version", "3"),
                 ("exported_at", exported_at.isoformat()),
                 ("track_count", str(len(tracks))),
                 ("playlist_count", str(len(playlists))),

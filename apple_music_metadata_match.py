@@ -192,8 +192,8 @@ def _is_readable(path: Path | None) -> bool:
 def load_input(snapshot: Path, audit: Path) -> LoadedInput:
     with contextlib.closing(app.connect_read_only(snapshot)) as connection:
         metadata = dict(connection.execute("SELECT key, value FROM metadata"))
-        if metadata.get("schema_version") != "2":
-            raise ValueError("snapshot schema_version must be 2")
+        if metadata.get("schema_version") not in {"2", "3"}:
+            raise ValueError("snapshot schema_version must be 2 or 3")
         rows = connection.execute(
             "SELECT persistent_id, name, artist, album, duration, location FROM tracks"
         )

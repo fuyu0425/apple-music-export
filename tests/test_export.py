@@ -21,6 +21,7 @@ class SnapshotTest(unittest.TestCase):
                     "duration": 245.5,
                     "rating": 80,
                     "favorited": True,
+                    "last_played_at": "2026-08-31T23:45:12.345000-04:00",
                 },
                 {
                     "persistent_id": "TRACK2",
@@ -32,6 +33,7 @@ class SnapshotTest(unittest.TestCase):
                     "duration": 180.0,
                     "rating": 20,
                     "favorited": False,
+                    "last_played_at": None,
                 },
             ],
             "playlists": [
@@ -48,7 +50,7 @@ class SnapshotTest(unittest.TestCase):
             path, memberships = write_snapshot(data, Path(directory))
             with contextlib.closing(sqlite3.connect(path)) as connection:
                 tracks = connection.execute(
-                    "SELECT persistent_id, location, duration, rating, favorited "
+                    "SELECT persistent_id, location, duration, rating, favorited, last_played_at "
                     "FROM tracks ORDER BY persistent_id"
                 ).fetchall()
                 schema_version = connection.execute(
@@ -62,12 +64,12 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(
             tracks,
             [
-                ("TRACK1", "/music/one.m4a", 245.5, 80, 1),
-                ("TRACK2", "/music/two.m4a", 180.0, 20, 0),
+                ("TRACK1", "/music/one.m4a", 245.5, 80, 1, "2026-08-31T23:45:12.345000-04:00"),
+                ("TRACK2", "/music/two.m4a", 180.0, 20, 0, None),
             ],
         )
         self.assertEqual(links, [("TRACK1", "PLAYLIST1"), ("TRACK2", "PLAYLIST1")])
-        self.assertEqual(schema_version, "2")
+        self.assertEqual(schema_version, "3")
         self.assertEqual(memberships, 2)
 
 

@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -172,6 +173,15 @@ class MetadataMatchTests(unittest.TestCase):
         return SimpleNamespace(
             candidates=list(candidates), recommendation=SimpleNamespace(name=recommendation)
         )
+
+    def test_loader_accepts_schema_version_2(self) -> None:
+        track = self.track("T1")
+        snapshot = self.snapshot([track])
+        with contextlib.closing(sqlite3.connect(snapshot)) as connection:
+            connection.execute("UPDATE metadata SET value = '2' WHERE key = 'schema_version'")
+            connection.commit()
+        loaded = load_input(snapshot, self.audit([self.audit_row(snapshot, track)]))
+        self.assertEqual([item.persistent_id for item in loaded.tracks], ["T1"])
 
     def test_loader_rejects_stale_or_changed_audit_rows(self) -> None:
         media = self.wav("one.wav")

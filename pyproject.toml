@@ -3,7 +3,9 @@ name = "apple-music-export"
 version = "0.1.0"
 description = "Export Apple Music status to timestamped SQLite snapshots"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "python-dotenv>=1.2.3",
+]
 
 [dependency-groups]
 dev = [
@@ -13,7 +15,6 @@ dev = [
 
 metadata = [
     "beets[chroma]==2.13.1",
-    "python-dotenv>=1.2.3",
 ]
 
 [tool.ruff]
