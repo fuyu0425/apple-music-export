@@ -345,3 +345,38 @@ Snapshots and live recovery artifacts can contain personal library data. The rep
 ## Credit
 
 This project used [epheterson/applemusic-mcp](https://github.com/epheterson/applemusic-mcp) as a reference for Apple Music scripting and automation behavior.
+
+## Import the library into Strawberry
+
+`apple_music_strawberry.py import-library` matches snapshot locations to Strawberry collection rows and copies Apple ratings. Strawberry indexes the existing Google Drive files in place. It stores paths and metadata in its database without moving or changing audio files.
+
+Preview the import first:
+
+```bash
+uv run python apple_music_strawberry.py import-library \
+  --snapshot snapshots/apple-music-20260902T011332.159242-0400.sqlite3 \
+  --snapshot-sha256 045f6586c4a45712b9fc45156cae1dd9c287502f5b3653782e95b29068a5f26c \
+  --strawberry-db '/Users/fuyu0425/Library/Application Support/Strawberry/Strawberry/strawberry.db' \
+  --strawberry-settings '/Users/fuyu0425/Library/Preferences/org.strawberrymusicplayer.Strawberry.plist' \
+  --collection-root '/Users/fuyu0425/GoogleDrive/music/iTunes Media/Music' \
+  --strawberry-app /Applications/strawberry.app \
+  --output snapshots/strawberry-library-import-preview
+```
+
+Apply the reviewed import to a new audit directory:
+
+```bash
+uv run python apple_music_strawberry.py import-library \
+  --snapshot snapshots/apple-music-20260902T011332.159242-0400.sqlite3 \
+  --snapshot-sha256 045f6586c4a45712b9fc45156cae1dd9c287502f5b3653782e95b29068a5f26c \
+  --strawberry-db '/Users/fuyu0425/Library/Application Support/Strawberry/Strawberry/strawberry.db' \
+  --strawberry-settings '/Users/fuyu0425/Library/Preferences/org.strawberrymusicplayer.Strawberry.plist' \
+  --collection-root '/Users/fuyu0425/GoogleDrive/music/iTunes Media/Music' \
+  --strawberry-app /Applications/strawberry.app \
+  --output snapshots/strawberry-library-import-apply \
+  --apply
+```
+
+The import omits the four snapshot rows without locations. It maps Apple ratings from 0 through 100 to Strawberry ratings from 0 through 1. Strawberry can store an unrated value as 0 or -1.
+
+Apply refuses unsafe Strawberry settings. Keep **Save ratings to song tags when possible** and **Overwrite database rating when songs are re-read from disk** unchecked.
