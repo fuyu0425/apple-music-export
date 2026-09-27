@@ -40,6 +40,47 @@ just export
 
 The exporter writes a timestamped SQLite file under `snapshots/`.
 
+## Migrate AIFF files to ALAC
+
+Export a fresh snapshot. Keep Music open on the intended library and stop playback.
+
+Preview the migration with a new audit directory:
+
+```bash
+uv run python apple_music_alac.py \
+  --snapshot snapshots/apple-music-<timestamp>.sqlite3 \
+  --library '/Users/fuyu0425/Music/音樂/Music Library.musiclibrary' \
+  --output snapshots/aiff-alac-dry-run
+```
+
+Use another new directory to apply the verified migration:
+
+```bash
+uv run python apple_music_alac.py \
+  --snapshot snapshots/apple-music-<timestamp>.sqlite3 \
+  --library '/Users/fuyu0425/Music/音樂/Music Library.musiclibrary' \
+  --output snapshots/aiff-alac-apply \
+  --apply
+```
+
+The command requires XLD `20250302` with ALAC sample-rate and bit-depth settings at `0` or absent. It rejects path collisions.
+
+The audit includes the source snapshot, package backup, snapshots, and complete `result.json` manifest. Original AIFF files remain in place.
+
+The user approved trusting XLD without decoded PCM proof. The audit records this choice and allows up to 0.1 seconds of container-duration drift.
+
+Automatic rollback uses JXA and the retained AIFF sources. It never restores the package backup automatically.
+
+After a failed canary with verified rollback and cleanup, retry with a new audit directory. If cleanup refuses a file, inspect it separately.
+
+For an interrupted run, inspect `active_batch` and each entry state. Export a fresh snapshot before recovery.
+
+If every entry matches its source snapshot, remove generated files only through the manifest hash guards. Otherwise, preserve all media files.
+
+Manual package recovery is a last resort and needs separate approval. Stop Music and `AMPLibraryAgent`, then move the live package aside.
+
+Restore the audit backup with `/usr/bin/ditto`. Reopen Music, export a snapshot, and compare it with the source snapshot.
+
 ## Review metadata matches
 
 Use `apple_music_metadata_match.py` to compare suspect metadata with AcoustID and MusicBrainz. One run creates a detailed review CSV and an unapproved JSON apply plan.
