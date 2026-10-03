@@ -34,45 +34,59 @@ function values(collection, propertyName, fallback) {
     return result;
 }
 
-const library = music.libraryPlaylists[0];
-const tracks = library.tracks;
-const ids = values(tracks, "persistentID", "");
-const databaseIds = values(tracks, "databaseID", 0);
-const names = values(tracks, "name", "");
-const artists = values(tracks, "artist", "");
-const albums = values(tracks, "album", "");
-const durations = values(tracks, "duration", 0);
-const ratings = values(tracks, "rating", 0);
-const favorites = values(tracks, "favorited", false);
-const playedDates = values(tracks, "playedDate", null);
+function collectTracks(container) {
+    const tracks = container.tracks;
+    const ids = values(tracks, "persistentID", "");
+    const databaseIds = values(tracks, "databaseID", 0);
+    const names = values(tracks, "name", "");
+    const artists = values(tracks, "artist", "");
+    const albums = values(tracks, "album", "");
+    const durations = values(tracks, "duration", 0);
+    const ratings = values(tracks, "rating", 0);
+    const favorites = values(tracks, "favorited", false);
+    const playedDates = values(tracks, "playedDate", null);
 
-const fileTracks = library.fileTracks;
-const fileIds = values(fileTracks, "persistentID", "");
-const fileLocations = values(fileTracks, "location", null);
-const locations = new Map();
-for (let i = 0; i < fileIds.length; i++) {
-    locations.set(fileIds[i], fileLocations[i] === null ? null : String(fileLocations[i]));
+    const fileTracks = container.fileTracks;
+    const fileIds = values(fileTracks, "persistentID", "");
+    const fileLocations = values(fileTracks, "location", null);
+    const locations = new Map();
+    for (let i = 0; i < fileIds.length; i++) {
+        locations.set(fileIds[i], fileLocations[i] === null ? null : String(fileLocations[i]));
+    }
+
+    return ids.map((id, i) => ({
+        persistent_id: id,
+        database_id: databaseIds[i],
+        name: names[i],
+        artist: artists[i],
+        album: albums[i],
+        duration: durations[i],
+        location: locations.get(id) || null,
+        rating: ratings[i],
+        favorited: favorites[i],
+        last_played_at: playedDates[i] === null ? null : playedDates[i].toISOString()
+    }));
 }
 
-const trackRows = ids.map((id, i) => ({
-    persistent_id: id,
-    database_id: databaseIds[i],
-    name: names[i],
-    artist: artists[i],
-    album: albums[i],
-    duration: durations[i],
-    location: locations.get(id) || null,
-    rating: ratings[i],
-    favorited: favorites[i],
-    last_played_at: playedDates[i] === null ? null : playedDates[i].toISOString()
-}));
-
-const playlistRows = music.userPlaylists().map(playlist => ({
-    persistent_id: playlist.persistentID(),
-    name: playlist.name(),
-    smart: playlist.smart(),
-    track_ids: values(playlist.tracks, "persistentID", "")
-}));
+const trackRows = collectTracks(music.libraryPlaylists[0]);
+const knownIds = new Set(trackRows.map(track => track.persistent_id));
+const playlistRows = music.userPlaylists().map(playlist => {
+    const trackIds = values(playlist.tracks, "persistentID", "");
+    if (trackIds.some(id => !knownIds.has(id))) {
+        for (const track of collectTracks(playlist)) {
+            if (!knownIds.has(track.persistent_id)) {
+                trackRows.push(track);
+                knownIds.add(track.persistent_id);
+            }
+        }
+    }
+    return {
+        persistent_id: playlist.persistentID(),
+        name: playlist.name(),
+        smart: playlist.smart(),
+        track_ids: trackIds
+    };
+});
 
 JSON.stringify({tracks: trackRows, playlists: playlistRows});
 """

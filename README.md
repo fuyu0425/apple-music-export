@@ -40,6 +40,20 @@ just export
 
 The exporter writes a timestamped SQLite file under `snapshots/`.
 
+The snapshot includes tracks found only in user playlists, including cloud favorites outside the main library.
+It preserves their favorite status and playlist memberships. A track without a local file has a null `location`.
+
+To list favorites without a recorded local file:
+
+```bash
+sqlite3 -header -csv snapshots/apple-music-<timestamp>.sqlite3 \
+  'SELECT persistent_id, name, artist, album FROM tracks WHERE favorited = 1 AND location IS NULL ORDER BY artist, name;'
+```
+
+This query is a review list, not proof that you need to buy each track.
+The snapshot does not store Music's cloud status. A separate live query must distinguish subscription tracks from purchases, matched tracks, and uploads.
+An Apple Music subscription download does not give permanent ownership. A metadata snapshot does not preserve audio or playback rights.
+
 ## Migrate AIFF files to ALAC
 
 Export a fresh snapshot. Keep Music open on the intended library and stop playback.
